@@ -34,10 +34,13 @@ public class ProductService {
     }
 
     /**
-     * Returns products ordered by semantic similarity to the query.
+     * Returns products ordered by semantic similarity to the query, with scores.
      * Query embedding is generated DB-side — no embedding SDK in the application.
      */
-    public List<Product> search(String query, int limit) {
-        return repository.findSemanticMatches(query, limit);
+    public List<SearchResult> search(String query, int limit) {
+        return repository.findSemanticMatches(query, limit)
+                .stream()
+                .map(SearchResult::from)
+                .toList();
     }
 }

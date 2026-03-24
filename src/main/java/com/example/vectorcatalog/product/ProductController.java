@@ -52,13 +52,9 @@ public class ProductController {
      * Response: 200 OK with array of {id, name, description, price} ordered by similarity
      */
     @GetMapping("/search")
-    public ResponseEntity<List<ProductResponse>> search(
+    public ResponseEntity<List<SearchResult>> search(
             @RequestParam String q,
             @RequestParam(defaultValue = "5") int limit) {
-        List<ProductResponse> results = service.search(q, limit)
-                .stream()
-                .map(ProductResponse::from)
-                .toList();
-        return ResponseEntity.ok(results);
+        return ResponseEntity.ok(service.search(q, limit));
     }
 }
