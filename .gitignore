@@ -1,6 +1,9 @@
 # Environment — contains API keys
 .env
 
+# GSD planning artifacts — internal tooling, not project source
+.gsd/
+
 # Maven build output
 target/
 
