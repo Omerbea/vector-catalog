@@ -1,0 +1,36 @@
+services:
+  database:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_DB: vectorcatalog
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      # pgai reads GOOGLE_API_KEY from the container environment automatically.
+      # The secret resolution chain checks env vars when api_key_name is provided.
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vectorcatalog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://database:5432/vectorcatalog
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    depends_on:
+      database:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+

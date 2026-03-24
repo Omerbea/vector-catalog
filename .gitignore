@@ -1,0 +1,15 @@
+# Environment — contains API keys
+.env
+
+# Maven build output
+target/
+
+# GSD runtime state
+.gsd/runtime/
+.gsd/activity/
+.gsd/worktrees/
+
+# IDE
+.idea/
+*.iml
+.DS_Store

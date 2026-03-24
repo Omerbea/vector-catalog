@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: vector-catalog
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/vectorcatalog}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:password}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      # validate: Hibernate checks the schema matches the entities but does NOT create/alter tables.
+      # init.sql (via docker-entrypoint-initdb.d) owns the schema — this prevents conflicts.
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.example.vectorcatalog: INFO
+    org.hibernate.SQL: WARN
