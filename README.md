@@ -1,30 +1,49 @@
 # vector-catalog
 
-A semantic product catalog built with **Spring Boot**, **PostgreSQL + pgai**, and **Google Gemini** — demonstrating zero-glue-code embedding generation.
+> **Semantic product search powered by Google Gemini — where the database generates the embeddings, not your application.**
 
-## The Core Idea
-
-Most embedding pipelines look like this:
-
-```
-Application → embedding SDK → AI API → back to application → INSERT into DB
+```bash
+curl "http://localhost:8080/api/products/search?q=tropical+weather"
+# → returns "Tropical Sun Hat", "Eversummer Jacket"
+# No keyword match. Pure semantic understanding.
 ```
 
-This project flips that:
+---
+
+## The Problem with Typical Embedding Pipelines
+
+Most embedding workflows look like this:
 
 ```
-Application → INSERT → DB trigger → AI API → embedding stored automatically
+INSERT product
+  → application calls Gemini API
+    → stores vector in DB
+      → hope they stay in sync
 ```
 
-Every time a product row is inserted or updated, a PostgreSQL trigger fires **inside the database** and calls Google Gemini to generate a 768-dimensional vector embedding. The Spring Boot layer has **no embedding SDK** and no embedding logic. It just inserts rows.
+Four moving parts. Two failure surfaces. One more background worker to maintain.
 
-Semantic search works the same way — the query embedding is generated inline in SQL:
+## The Zero-Glue-Code Architecture
+
+```
+INSERT product → PostgreSQL trigger → Gemini API → vector stored atomically
+```
+
+This project demonstrates a single architectural idea: **let the database own the embeddings**.
+
+A `BEFORE INSERT OR UPDATE` trigger calls Google Gemini from inside PostgreSQL via [pgai](https://github.com/timescale/pgai). The vector is stored in the same transaction as the row. If the API call fails, the insert fails — you can never have a product without an embedding.
+
+The Spring Boot application has **zero embedding code**. It issues a plain `save()`. The 768-dimensional vector appears automatically.
+
+Semantic search follows the same principle — the query embedding is generated inline in SQL:
 
 ```sql
 ORDER BY embedding <=> ai.litellm_embed('gemini/gemini-embedding-2-preview', :query, ...)
 ```
 
-This is the "zero glue code" architecture.
+No embedding SDK in the application. Not even for search.
+
+---
 
 ## Stack
 
@@ -32,86 +51,108 @@ This is the "zero glue code" architecture.
 |---|---|
 | Language | Java 21 |
 | Framework | Spring Boot 3.4 |
-| Database | PostgreSQL 16 (via Timescale HA image) |
-| AI Extensions | pgvector + pgai 0.11.2 |
-| Embedding Model | Google Gemini `gemini-embedding-2-preview` (768-dim) |
-| LiteLLM Bridge | `ai.litellm_embed` — pgai's LiteLLM proxy function |
+| Database | PostgreSQL 16 via `timescale/timescaledb-ha:pg16` |
+| Vector storage | [pgvector](https://github.com/pgvector/pgvector) — `VECTOR(768)` column + HNSW index |
+| AI in the DB | [pgai](https://github.com/timescale/pgai) 0.11.2 — `ai.litellm_embed` function |
+| Embedding model | Google Gemini `gemini-embedding-2-preview` (768-dim) |
+| ORM | Hibernate 6.6 with native vector type support |
 
-> **Note on `ai.gemini_embed`:** The spec for this project referenced `ai.gemini_embed`, but that function does not exist in pgai 0.11.2. The equivalent is `ai.litellm_embed('gemini/gemini-embedding-2-preview', ...)` — LiteLLM supports Gemini as a backend via the `gemini/` model prefix. The architecture and zero-glue-code pattern are identical.
+---
 
 ## Prerequisites
 
 - Docker + Docker Compose
-- A Google Gemini API key ([get one free](https://aistudio.google.com/app/apikey))
+- A Google Gemini API key — [get one free](https://aistudio.google.com/app/apikey)
+
+---
 
 ## Quickstart
 
 ```bash
-# 1. Clone and configure
+# 1. Clone
 git clone https://github.com/your-username/vector-catalog
 cd vector-catalog
+
+# 2. Configure
 cp .env.example .env
-# Edit .env and set GOOGLE_API_KEY=your_key_here
+# Open .env and set: GOOGLE_API_KEY=your_key_here
 
-# 2. Start everything
+# 3. Run
 docker compose up --build
-
-# Wait ~20-30 seconds for the DB to initialize, the app to start,
-# and the seed products to be embedded (8 Gemini API calls on first boot).
 ```
+
+On first boot, 8 sample products are seeded automatically. Each triggers a live Gemini API call from inside PostgreSQL. Expect ~20–40 seconds for the full startup + seeding cycle.
+
+---
 
 ## API
 
-### Add a product
+### `POST /api/products` — Add a product
 
 ```bash
 curl -X POST http://localhost:8080/api/products \
   -H "Content-Type: application/json" \
-  -d '{"name": "Eversummer Jacket", "description": "Lightweight breathable windbreaker for humid climates", "price": 89.99}'
+  -d '{
+    "name": "Eversummer Jacket",
+    "description": "Lightweight breathable windbreaker for humid climates",
+    "price": 89.99
+  }'
 ```
 
-Response `201 Created`:
 ```json
-{"id": 1, "name": "Eversummer Jacket", "description": "Lightweight breathable windbreaker for humid climates", "price": 89.99}
+{
+  "id": 1,
+  "name": "Eversummer Jacket",
+  "description": "Lightweight breathable windbreaker for humid climates",
+  "price": 89.99
+}
 ```
 
-The `embedding` column is populated automatically by the DB trigger — the application never touches it.
+The `embedding` column is populated by the DB trigger. The application never touches it.
 
-### Semantic search
+---
+
+### `GET /api/products/search?q=...` — Semantic search
 
 ```bash
 curl "http://localhost:8080/api/products/search?q=tropical+weather"
 curl "http://localhost:8080/api/products/search?q=winter+protection&limit=3"
+curl "http://localhost:8080/api/products/search?q=something+for+the+rain"
 ```
 
-Response `200 OK`:
+Results are ranked by cosine similarity. "tropical weather" returns "Tropical Sun Hat" and "Eversummer Jacket" because Gemini understands semantic proximity — not because any keyword matched.
+
 ```json
 [
-  {"id": 5, "name": "Tropical Sun Hat", ...},
-  {"id": 1, "name": "Eversummer Jacket", ...}
+  { "id": 5, "name": "Tropical Sun Hat", "description": "Wide brim hat with UV protection...", "price": 29.99 },
+  { "id": 1, "name": "Eversummer Jacket", "description": "Lightweight breathable windbreaker...", "price": 89.99 }
 ]
 ```
 
-Searching "tropical weather" returns "Tropical Sun Hat" and "Eversummer Jacket" — not because they contain those words, but because Gemini understands the semantic relationship.
+---
 
-### Get product by ID
+### `GET /api/products/{id}` — Get by ID
 
 ```bash
-curl http://localhost:8080/api/products/1
+curl http://localhost:8080/api/products/1   # 200 OK
+curl http://localhost:8080/api/products/999 # 404 Not Found
 ```
+
+---
 
 ## How It Works
 
-### Database trigger
+### The trigger
 
 ```sql
 CREATE OR REPLACE FUNCTION auto_generate_embedding()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- Called from inside PostgreSQL. Zero application involvement.
     NEW.embedding = ai.litellm_embed(
-        'gemini/gemini-embedding-2-preview',
-        NEW.name || ': ' || NEW.description,
-        api_key_name => 'GOOGLE_API_KEY',
+        'gemini/gemini-embedding-2-preview',  -- Gemini via LiteLLM proxy
+        NEW.name || ': ' || NEW.description,  -- text to embed
+        api_key_name => 'GOOGLE_API_KEY',     -- reads env var automatically
         extra_options => '{"dimensions": 768}'::jsonb
     );
     RETURN NEW;
@@ -123,20 +164,28 @@ CREATE TRIGGER trg_products_embed
     FOR EACH ROW EXECUTE FUNCTION auto_generate_embedding();
 ```
 
-The trigger runs **before** the row commits — so if the Gemini API call fails, the INSERT fails too. You can never have a product without an embedding.
-
-### Spring Boot entity
+### The entity
 
 ```java
-@JdbcTypeCode(SqlTypes.VECTOR)
-@Array(length = 768)
-@Column(name = "embedding")
-private float[] embedding;
+@Entity
+@Table(name = "products")
+public class Product {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String name;
+    private String description;
+    private BigDecimal price;
+
+    // DB trigger owns this. Spring never writes to it.
+    @JdbcTypeCode(SqlTypes.VECTOR)
+    @Array(length = 768)
+    private float[] embedding;
+}
 ```
 
-Hibernate 6.4+ maps `float[]` to pgvector's `VECTOR(768)` type natively.
+Hibernate 6.6 maps `float[]` to `VECTOR(768)` natively via the `hibernate-vector` module. No `pgvector-java` library needed.
 
-### Search query
+### The search query
 
 ```java
 @Query(value = """
@@ -153,36 +202,55 @@ Hibernate 6.4+ maps `float[]` to pgvector's `VECTOR(768)` type natively.
 List<Product> findSemanticMatches(String query, int limit);
 ```
 
-## API Key Security
+The query vector is generated inside PostgreSQL. The HNSW index on `products(embedding vector_cosine_ops)` makes it fast.
 
-`GOOGLE_API_KEY` is passed as an environment variable to the database container. pgai's secret resolution reads it automatically when `api_key_name => 'GOOGLE_API_KEY'` is used in a function call — no application-level key management required.
+---
 
-The key is only needed by the database container. The Spring Boot app never sees it.
+## API Key Flow
 
-## Known Limitations
+`GOOGLE_API_KEY` lives only in the database container's environment. pgai's secret resolution reads it automatically when `api_key_name => 'GOOGLE_API_KEY'` appears in a function call — no session parameters, no `PGOPTIONS`, no application-level key management.
 
-- **Insert latency:** Each INSERT makes a synchronous Gemini API call from inside PostgreSQL. Expect 300ms–2s per insert depending on network conditions. This is a deliberate tradeoff — the trigger guarantees consistency (no row without an embedding).
-- **`ai.gemini_embed` not available:** pgai 0.11.2 doesn't have a dedicated Gemini embed function. We use `ai.litellm_embed` with the `gemini/` prefix, which routes through LiteLLM's Gemini integration.
-- **768-dim truncation:** `gemini-embedding-2-preview` defaults to 3072 dimensions. We pass `{"dimensions": 768}` via `extra_options` to truncate — this matches the spec and reduces storage/index size.
+**The Spring Boot app never sees the API key.**
+
+---
 
 ## Project Structure
 
 ```
 vector-catalog/
-├── compose.yaml                      # Docker Compose (DB + app)
-├── Dockerfile                        # Spring Boot app image
+├── compose.yaml                      # DB + app services
+├── Dockerfile                        # eclipse-temurin:21-jre base
 ├── docker/
-│   └── init.sql                      # DB schema, trigger, HNSW index
-├── .env.example                      # Environment variable template
+│   └── init.sql                      # Extensions, table, trigger, HNSW index
+├── .env.example                      # Copy to .env and set GOOGLE_API_KEY
 └── src/main/java/com/example/vectorcatalog/
     ├── VectorCatalogApplication.java
-    ├── DataSeeder.java               # Seeds 8 sample products on first boot
+    ├── DataSeeder.java               # Seeds 8 products on first boot
     ├── GlobalExceptionHandler.java   # Structured JSON error responses
     └── product/
-        ├── Product.java              # JPA entity with vector mapping
-        ├── ProductRequest.java       # Inbound DTO
-        ├── ProductResponse.java      # Outbound DTO (no embedding)
-        ├── ProductRepository.java    # JPA repo + native search query
-        ├── ProductService.java       # Business logic
-        └── ProductController.java    # REST endpoints
+        ├── Product.java              # JPA entity with @JdbcTypeCode(VECTOR)
+        ├── ProductRequest.java       # Inbound DTO (no embedding field)
+        ├── ProductResponse.java      # Outbound DTO (no embedding field)
+        ├── ProductRepository.java    # JPA repo + native vector search query
+        ├── ProductService.java
+        └── ProductController.java    # POST /api/products, GET /search, GET /{id}
 ```
+
+---
+
+## Trade-offs and Limitations
+
+**Insert latency** — each `INSERT` makes a synchronous Gemini API call from inside the DB transaction. Expect 300ms–2s per insert. This is the cost of the consistency guarantee: no row without an embedding, no eventual-consistency complexity.
+
+**`ai.gemini_embed` doesn't exist (yet)** — pgai 0.11.2 has no dedicated Gemini embed function. This project uses `ai.litellm_embed` with the `gemini/` model prefix, which routes through LiteLLM's Gemini integration. The architecture is identical to what a native `ai.gemini_embed` would look like.
+
+**768-dim truncation** — `gemini-embedding-2-preview` outputs 3072 dimensions by default. We request 768 via `extra_options => '{"dimensions": 768}'` to match the column type and reduce index size.
+
+---
+
+## Further Reading
+
+- [pgai — AI functions for PostgreSQL](https://github.com/timescale/pgai)
+- [pgvector — vector similarity search for PostgreSQL](https://github.com/pgvector/pgvector)
+- [Hibernate Vector module](https://docs.jboss.org/hibernate/orm/6.6/userguide/html_single/Hibernate_User_Guide.html#basic-vector)
+- [Google Gemini Embeddings API](https://ai.google.dev/gemini-api/docs/embeddings)
